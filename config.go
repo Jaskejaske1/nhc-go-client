@@ -210,6 +210,7 @@ func (c *NikoConfig) SaveConfig() error {
 		IP:      c.IP,
 		Port:    c.Port,
 		Timeout: c.Timeout.String(), // This will format it as "20s" instead of nanoseconds
+		Aliases: c.Aliases,
 	}
 
 	configPath, err := GetConfigPath()

@@ -58,6 +58,14 @@ func main() {
 		}
 	}
 
+	// Handle alias commands if present
+	if len(os.Args) > 1 && os.Args[1] == "alias" {
+		if err := handleAliasCommand(os.Args[2:], config); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
 	// Create client with loaded config
 	client, err := NewClient(Config{
 		IP:      config.IP,
@@ -74,6 +82,16 @@ func main() {
 		client.SetLogLevel(LogLevelDebug)
 	}
 
+	// Parse and handle commands
+	command, args := parseCommand()
+	if command != "" {
+		if err := handleCommand(command, args, config, client); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	// If no command provided, continue with the existing status display
 	// Setup tabwriter for aligned output
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 
@@ -175,12 +193,12 @@ func printLocations(w *tabwriter.Writer, locations []Location) {
 	w.Flush()
 }
 
-func printActions(w *tabwriter.Writer, actions []Action, locations []Location) {
+func printActions(w *tabwriter.Writer, actions []Action, locations []Location, config *NikoConfig) {
 	fmt.Println("Actions:")
 	fmt.Println(strings.Repeat("-", 20))
 
-	fmt.Fprintln(w, "ID\tName\tLocation\tType\tState")
-	fmt.Fprintln(w, strings.Repeat("-", 50))
+	fmt.Fprintln(w, "ID\tName\tLocation\tType\tState\tAlias")
+	fmt.Fprintln(w, strings.Repeat("-", 60))
 
 	// Create location map for quick lookups
 	locationMap := make(map[int]string)
@@ -222,17 +240,24 @@ func printActions(w *tabwriter.Writer, actions []Action, locations []Location) {
 					}
 				}
 				locationName := locationMap[action.Location]
-				fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n",
+
+				// Get alias if exists
+				alias := config.GetDeviceAlias(string(action.Type), action.ID)
+				aliasStr := ""
+				if alias != "" {
+					aliasStr = fmt.Sprintf("(%s)", alias)
+				}
+
+				fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\n",
 					action.ID,
 					action.Name,
 					locationName,
 					action.Type,
-					state)
+					state,
+					aliasStr)
 			}
 		}
 	}
-	fmt.Fprintln(w)
-	w.Flush()
 }
 
 func printThermostats(w *tabwriter.Writer, thermostats []Thermostat) {
@@ -273,4 +298,46 @@ func formatSystemTime(timeStr string) string {
 		timeStr[10:12], // MM
 		timeStr[12:14], // SS
 	)
+}
+
+func parseCommand() (command string, args []string) {
+	if len(os.Args) < 2 {
+		return "", nil
+	}
+	return os.Args[1], os.Args[2:]
+}
+
+func handleCommand(command string, args []string, config *NikoConfig, client *Client) error {
+	switch command {
+	case "alias":
+		return handleAliasCommand(args, config)
+	case "light", "scene", "socket":
+		return handleDeviceCommand(command, args, config, client)
+	default:
+		return fmt.Errorf("unknown command: %s", command)
+	}
+}
+
+func handleDeviceCommand(deviceType string, args []string, config *NikoConfig, client *Client) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: nhc %s <on|off> <id|alias>", deviceType)
+	}
+
+	action := args[0]
+	idOrAlias := args[1]
+
+	// Resolve ID from either direct ID or alias
+	id, err := resolveID(config, deviceType, idOrAlias)
+	if err != nil {
+		return err
+	}
+
+	switch action {
+	case "on":
+		return client.TurnOn(id)
+	case "off":
+		return client.TurnOff(id)
+	default:
+		return fmt.Errorf("unknown action: %s (use 'on' or 'off')", action)
+	}
 }
