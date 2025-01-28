@@ -114,7 +114,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	printActions(w, actions, locations) // Pass locations to printActions
+	printActions(w, actions, locations, config)
 
 	// Get and print thermostats
 	thermostats, err := client.GetThermostats()
@@ -332,11 +332,22 @@ func handleDeviceCommand(deviceType string, args []string, config *NikoConfig, c
 		return err
 	}
 
+	// Get the action to check if it exists and has the correct type
+	actionObj, err := client.GetActionByID(id)
+	if err != nil {
+		return err
+	}
+
+	// Verify the action type matches the command
+	if string(actionObj.Type) != strings.ToUpper(deviceType) {
+		return fmt.Errorf("device with ID %d is a %s, not a %s", id, actionObj.Type, strings.ToUpper(deviceType))
+	}
+
 	switch action {
 	case "on":
-		return client.TurnOn(id)
+		return actionObj.TurnOn()
 	case "off":
-		return client.TurnOff(id)
+		return actionObj.TurnOff()
 	default:
 		return fmt.Errorf("unknown action: %s (use 'on' or 'off')", action)
 	}

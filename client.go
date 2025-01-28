@@ -453,3 +453,26 @@ func (t *Thermostat) Update(c *Client) error {
 
 	return fmt.Errorf("thermostat with ID %d not found", t.ID)
 }
+
+// Add these methods to client.go
+func (c *Client) TurnOn(id int) error {
+	return c.ExecuteAction(id, 255) // 255 for full brightness
+}
+
+func (c *Client) TurnOff(id int) error {
+	return c.ExecuteAction(id, 0)
+}
+
+func (c *Client) GetActionByID(id int) (*Action, error) {
+	actions, err := c.GetActions()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, action := range actions {
+		if action.ID == id {
+			return &action, nil
+		}
+	}
+	return nil, fmt.Errorf("action with ID %d not found", id)
+}
