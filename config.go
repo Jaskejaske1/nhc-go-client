@@ -21,17 +21,25 @@ var (
 	ErrConfigCorrupted = fmt.Errorf("configuration file is corrupted")
 )
 
+type DeviceAliases struct {
+	Lights  map[int]string `json:"lights,omitempty"`
+	Scenes  map[int]string `json:"scenes,omitempty"`
+	Sockets map[int]string `json:"sockets,omitempty"`
+}
+
 // Add this type for JSON loading
 type configJSON struct {
-	IP      string `json:"ip"`
-	Port    int    `json:"port"`
-	Timeout string `json:"timeout"`
+	IP      string        `json:"ip"`
+	Port    int           `json:"port"`
+	Timeout string        `json:"timeout"`
+	Aliases DeviceAliases `json:"aliases,omitempty"`
 }
 
 type NikoConfig struct {
 	IP      string        `json:"ip"`
 	Port    int           `json:"port"`
 	Timeout time.Duration `json:"timeout"`
+	Aliases DeviceAliases `json:"aliases,omitempty"`
 }
 
 // ConfigOption represents a function that modifies the configuration
@@ -63,6 +71,11 @@ func DefaultConfig() NikoConfig {
 	return NikoConfig{
 		Port:    DefaultPort,
 		Timeout: DefaultTimeout,
+		Aliases: DeviceAliases{
+			Lights:  make(map[int]string),
+			Scenes:  make(map[int]string),
+			Sockets: make(map[int]string),
+		},
 	}
 }
 
@@ -132,6 +145,7 @@ func (c *NikoConfig) loadFromFile() error {
 	// Convert the values to the actual config struct
 	c.IP = jsonConfig.IP
 	c.Port = jsonConfig.Port
+	c.Aliases = jsonConfig.Aliases
 
 	// Parse the timeout string into a duration
 	timeout, err := time.ParseDuration(jsonConfig.Timeout)
@@ -237,5 +251,48 @@ func (c *NikoConfig) SaveConfig() error {
 		return fmt.Errorf("failed to save config file: %w", err)
 	}
 
+	return nil
+}
+
+// A helper method for NikoConfig
+func (c *NikoConfig) GetDeviceAlias(deviceType string, id int) string {
+	switch deviceType {
+	case "light":
+		if alias, ok := c.Aliases.Lights[id]; ok {
+			return alias
+		}
+	case "scene":
+		if alias, ok := c.Aliases.Scenes[id]; ok {
+			return alias
+		}
+	case "socket":
+		if alias, ok := c.Aliases.Sockets[id]; ok {
+			return alias
+		}
+	}
+	return "" // Return empty string if no alias found
+}
+
+// A helper method to set aliases
+func (c *NikoConfig) SetDeviceAlias(deviceType string, id int, alias string) error {
+	switch deviceType {
+	case "light":
+		if c.Aliases.Lights == nil {
+			c.Aliases.Lights = make(map[int]string)
+		}
+		c.Aliases.Lights[id] = alias
+	case "scene":
+		if c.Aliases.Scenes == nil {
+			c.Aliases.Scenes = make(map[int]string)
+		}
+		c.Aliases.Scenes[id] = alias
+	case "socket":
+		if c.Aliases.Sockets == nil {
+			c.Aliases.Sockets = make(map[int]string)
+		}
+		c.Aliases.Sockets[id] = alias
+	default:
+		return fmt.Errorf("invalid device type: %s", deviceType)
+	}
 	return nil
 }
