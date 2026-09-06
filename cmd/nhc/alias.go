@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	. "nhc-go-client"
 	"strconv"
 )
 

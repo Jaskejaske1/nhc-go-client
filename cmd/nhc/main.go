@@ -2,11 +2,15 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
+	. "nhc-go-client"
+	"nhc-go-client/internal/curve"
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -18,6 +22,15 @@ const (
 )
 
 func main() {
+	command, args, options, err := parseCommand()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if command == "help" || command == "-h" || command == "--help" {
+		printUsage()
+		return
+	}
+
 	// Setup signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -30,7 +43,7 @@ func main() {
 	printHeader()
 
 	// Load configuration
-	config, err := LoadConfig()
+	config, err := LoadConfig(options...)
 	if err != nil {
 		if err == ErrNoIPAddress {
 			// No IP configured, let's create a new config
@@ -59,18 +72,22 @@ func main() {
 	}
 
 	// Handle alias commands if present
-	if len(os.Args) > 1 && os.Args[1] == "alias" {
-		if err := handleAliasCommand(os.Args[2:], config); err != nil {
+	if command == "alias" {
+		if err := handleAliasCommand(args, config); err != nil {
 			log.Fatal(err)
 		}
 		return
 	}
+	if command == "status" {
+		command = ""
+	}
 
 	// Create client with loaded config
 	client, err := NewClient(Config{
-		IP:      config.IP,
-		Port:    config.Port,
-		Timeout: config.Timeout,
+		IP:              config.IP,
+		Port:            config.Port,
+		Timeout:         config.Timeout,
+		BrightnessCurve: mustBrightnessMapper(config),
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -83,7 +100,6 @@ func main() {
 	}
 
 	// Parse and handle commands
-	command, args := parseCommand()
 	if command != "" {
 		if err := handleCommand(command, args, config, client); err != nil {
 			log.Fatal(err)
@@ -141,6 +157,14 @@ func mustGetConfigPath() string {
 		return "~/.config/nhc-go-client/config.json"
 	}
 	return path
+}
+
+func mustBrightnessMapper(config *NikoConfig) curve.Mapper {
+	mapper, err := config.Brightness.Mapper()
+	if err != nil {
+		log.Fatalf("invalid brightness curve: %v", err)
+	}
+	return mapper
 }
 
 func printHeader() {
@@ -234,7 +258,7 @@ func printActions(w *tabwriter.Writer, actions []Action, locations []Location, c
 				state := "Off"
 				if action.IsOn() {
 					if action.Type == ActionTypeLight {
-						state = fmt.Sprintf("On (%d%%)", int(float64(action.Value1)/255*100))
+						state = fmt.Sprintf("On (%d%%)", action.Value1)
 					} else {
 						state = "On"
 					}
@@ -300,17 +324,80 @@ func formatSystemTime(timeStr string) string {
 	)
 }
 
-func parseCommand() (command string, args []string) {
-	if len(os.Args) < 2 {
-		return "", nil
+func parseCommand() (string, []string, []ConfigOption, error) {
+	flags := flag.NewFlagSet("nhc", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	flags.Usage = func() {}
+	ip := flags.String("ip", "", "Niko Home Control IP address")
+	port := flags.Int("port", 0, "Niko Home Control TCP port")
+	timeout := flags.Duration("timeout", 0, "request timeout, for example 5s")
+	brightnessCurve := flags.String("brightness-curve", "", "brightness curve: linear, gamma, or lookup")
+	gamma := flags.Float64("brightness-gamma", 0, "gamma exponent for the gamma brightness curve")
+	debug := flags.Bool("debug", false, "enable debug logging")
+	if err := flags.Parse(os.Args[1:]); err != nil {
+		if err == flag.ErrHelp {
+			return "help", nil, nil, nil
+		}
+		return "", nil, nil, err
 	}
-	return os.Args[1], os.Args[2:]
+
+	var options []ConfigOption
+	if *brightnessCurve != "" {
+		options = append(options, WithBrightnessCurve(*brightnessCurve))
+	}
+	if *gamma != 0 {
+		options = append(options, WithBrightnessGamma(*gamma))
+	}
+	if *ip != "" {
+		options = append(options, WithIP(*ip))
+	}
+	if *port != 0 {
+		options = append(options, WithPort(*port))
+	}
+	if *timeout != 0 {
+		options = append(options, WithTimeout(*timeout))
+	}
+	if *debug {
+		os.Setenv("NHC_DEBUG", "1")
+	}
+
+	args := flags.Args()
+	if len(args) == 0 {
+		return "", nil, options, nil
+	}
+	return args[0], args[1:], options, nil
+}
+
+func printUsage() {
+	fmt.Println("Niko Home Control Client")
+	fmt.Println()
+	fmt.Println("Usage:")
+	fmt.Println("  nhc [flags]                 Show system status")
+	fmt.Println("  nhc [flags] status          Show system status")
+	fmt.Println("  nhc [flags] light on <id|alias> [brightness]")
+	fmt.Println("  nhc [flags] light off <id|alias>")
+	fmt.Println("  nhc [flags] scene on <id|alias>")
+	fmt.Println("  nhc [flags] socket off <id|alias>")
+	fmt.Println("  nhc alias add <type> <id> <alias>")
+	fmt.Println("  nhc alias remove <type> <alias>")
+	fmt.Println("  nhc alias list [type]")
+	fmt.Println("  nhc macro list")
+	fmt.Println("  nhc macro validate <name>")
+	fmt.Println("  nhc macro run <name>")
+	fmt.Println()
+	fmt.Println("Flags:")
+	fmt.Println("  -ip string       override the configured controller IP")
+	fmt.Println("  -port int        override the configured TCP port")
+	fmt.Println("  -timeout duration  override the request timeout")
+	fmt.Println("  -debug           enable debug logging")
 }
 
 func handleCommand(command string, args []string, config *NikoConfig, client *Client) error {
 	switch command {
 	case "alias":
 		return handleAliasCommand(args, config)
+	case "macro":
+		return handleMacroCommand(args, config, client)
 	case "light", "scene", "socket":
 		return handleDeviceCommand(command, args, config, client)
 	default:
@@ -318,9 +405,38 @@ func handleCommand(command string, args []string, config *NikoConfig, client *Cl
 	}
 }
 
+func handleMacroCommand(args []string, config *NikoConfig, client *Client) error {
+	if len(args) == 1 && args[0] == "list" {
+		names := make([]string, 0, len(config.Macros))
+		for name := range config.Macros {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			fmt.Println(name)
+		}
+		return nil
+	}
+	if len(args) != 2 {
+		return fmt.Errorf("usage: nhc macro <list|validate|run> [name]")
+	}
+	macro, ok := config.Macros[args[1]]
+	if !ok {
+		return fmt.Errorf("macro not found: %s", args[1])
+	}
+	switch args[0] {
+	case "validate":
+		return client.ValidateMacro(macro)
+	case "run":
+		return client.RunMacro(macro)
+	default:
+		return fmt.Errorf("unknown macro command: %s", args[0])
+	}
+}
+
 func handleDeviceCommand(deviceType string, args []string, config *NikoConfig, client *Client) error {
-	if len(args) < 2 {
-		return fmt.Errorf("usage: nhc %s <on|off> <id|alias>", deviceType)
+	if len(args) < 2 || len(args) > 3 {
+		return fmt.Errorf("usage: nhc %s <on|off> <id|alias> [brightness]", deviceType)
 	}
 
 	action := args[0]
@@ -345,8 +461,21 @@ func handleDeviceCommand(deviceType string, args []string, config *NikoConfig, c
 
 	switch action {
 	case "on":
+		if len(args) == 3 {
+			if deviceType != "light" {
+				return fmt.Errorf("brightness can only be set for lights")
+			}
+			brightness, err := strconv.Atoi(args[2])
+			if err != nil {
+				return fmt.Errorf("invalid brightness %q: %w", args[2], err)
+			}
+			return actionObj.TurnOn(brightness)
+		}
 		return actionObj.TurnOn()
 	case "off":
+		if len(args) == 3 {
+			return fmt.Errorf("brightness can only be used with 'light on'")
+		}
 		return actionObj.TurnOff()
 	default:
 		return fmt.Errorf("unknown action: %s (use 'on' or 'off')", action)

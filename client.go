@@ -1,5 +1,5 @@
 // client.go
-package main
+package nhc
 
 import (
 	"bufio"
@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"nhc-go-client/internal/curve"
 )
 
 const (
@@ -17,6 +19,7 @@ const (
 	DefaultTimeout = 20 * time.Second
 	MaxRetries     = 3
 	RetryDelay     = time.Second
+	MaxActionValue = curve.MaxPercent
 )
 
 type LogLevel int
@@ -37,9 +40,10 @@ const (
 )
 
 type Config struct {
-	IP      string
-	Port    int
-	Timeout time.Duration
+	IP              string
+	Port            int
+	Timeout         time.Duration
+	BrightnessCurve curve.Mapper
 }
 
 type Client struct {
@@ -50,6 +54,7 @@ type Client struct {
 	mu       sync.Mutex
 	reader   *bufio.Reader
 	logLevel LogLevel
+	curve    curve.Mapper
 }
 
 type commandRequest struct {
@@ -71,6 +76,16 @@ type Action struct {
 	Location int        `json:"location"`
 	RawType  int        `json:"type"`
 	client   *Client
+}
+
+type MacroStep struct {
+	ID    int        `json:"id"`
+	Type  ActionType `json:"type"`
+	Value int        `json:"value"`
+}
+
+type Macro struct {
+	Steps []MacroStep `json:"steps"`
 }
 
 type Location struct {
@@ -103,6 +118,10 @@ func NewClient(config Config) (*Client, error) {
 		port:     config.Port,
 		timeout:  config.Timeout,
 		logLevel: LogLevelError, // Default to error logging
+		curve:    config.BrightnessCurve,
+	}
+	if client.curve == nil {
+		client.curve = curve.Linear{}
 	}
 
 	if err := client.connect(); err != nil {
@@ -114,6 +133,18 @@ func NewClient(config Config) (*Client, error) {
 
 func (c *Client) SetLogLevel(level LogLevel) {
 	c.logLevel = level
+}
+
+func (c *Client) SetBrightnessCurve(mapper curve.Mapper) {
+	if mapper == nil {
+		c.curve = curve.Linear{}
+		return
+	}
+	c.curve = mapper
+}
+
+func (c *Client) mapBrightness(percent int) (int, error) {
+	return c.curve.Map(percent)
 }
 
 func (c *Client) logDebug(format string, args ...interface{}) {
@@ -137,7 +168,10 @@ func (c *Client) logError(format string, args ...interface{}) {
 func (c *Client) connect() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.connectLocked()
+}
 
+func (c *Client) connectLocked() error {
 	if c.conn != nil {
 		c.conn.Close()
 	}
@@ -196,19 +230,30 @@ func (c *Client) sendCommand(cmd interface{}) ([]byte, error) {
 			delay := RetryDelay * time.Duration(attempt)
 			c.logInfo("Retry attempt %d after %v delay", attempt+1, delay)
 			time.Sleep(delay)
+			if err := c.connectLocked(); err != nil {
+				lastErr = fmt.Errorf("retry %d: failed to reconnect: %w", attempt+1, err)
+				continue
+			}
+		}
+
+		if c.conn == nil {
+			if err := c.connectLocked(); err != nil {
+				lastErr = fmt.Errorf("retry %d: failed to reconnect: %w", attempt+1, err)
+				continue
+			}
 		}
 
 		if err := c.conn.SetWriteDeadline(time.Now().Add(c.timeout)); err != nil {
-			if err := c.connect(); err != nil {
-				lastErr = fmt.Errorf("retry %d: failed to reconnect: %w", attempt+1, err)
-				c.logError("Connection error: %v", lastErr)
-				continue
-			}
+			lastErr = fmt.Errorf("retry %d: failed to set write deadline: %w", attempt+1, err)
+			c.logError("Deadline error: %v", lastErr)
+			continue
 		}
 
 		if _, err := c.conn.Write(data); err != nil {
 			lastErr = fmt.Errorf("retry %d: failed to write command: %w", attempt+1, err)
 			c.logError("Write error: %v", lastErr)
+			c.conn.Close()
+			c.conn = nil
 			continue
 		}
 
@@ -222,6 +267,8 @@ func (c *Client) sendCommand(cmd interface{}) ([]byte, error) {
 		if err != nil {
 			lastErr = fmt.Errorf("retry %d: failed to read response: %w", attempt+1, err)
 			c.logError("Read error: %v", lastErr)
+			c.conn.Close()
+			c.conn = nil
 			continue
 		}
 
@@ -371,10 +418,10 @@ func (a *Action) DetermineType() ActionType {
 }
 
 func (a *Action) TurnOn(brightness ...int) error {
-	value := 255 // Default full brightness
+	value := MaxActionValue
 	if len(brightness) > 0 {
-		if brightness[0] < 0 || brightness[0] > 255 {
-			return fmt.Errorf("brightness must be between 0 and 255, got %d", brightness[0])
+		if brightness[0] < 0 || brightness[0] > MaxActionValue {
+			return fmt.Errorf("brightness must be between 0 and %d, got %d", MaxActionValue, brightness[0])
 		}
 		value = brightness[0]
 	}
@@ -383,8 +430,16 @@ func (a *Action) TurnOn(brightness ...int) error {
 	if a.Type != ActionTypeLight && len(brightness) > 0 {
 		return fmt.Errorf("brightness can only be set for lights, not for %s", a.Type)
 	}
+	requested := value
+	if len(brightness) == 0 {
+		requested = MaxActionValue
+	}
+	value, err := a.client.mapBrightness(requested)
+	if err != nil {
+		return fmt.Errorf("invalid brightness for action %d: %w", a.ID, err)
+	}
 
-	err := a.client.ExecuteAction(a.ID, value)
+	err = a.client.ExecuteAction(a.ID, value)
 	if err != nil {
 		return fmt.Errorf("failed to turn on action %d: %w", a.ID, err)
 	}
@@ -456,7 +511,7 @@ func (t *Thermostat) Update(c *Client) error {
 
 // Add these methods to client.go
 func (c *Client) TurnOn(id int) error {
-	return c.ExecuteAction(id, 255) // 255 for full brightness
+	return c.ExecuteAction(id, MaxActionValue)
 }
 
 func (c *Client) TurnOff(id int) error {
@@ -475,4 +530,68 @@ func (c *Client) GetActionByID(id int) (*Action, error) {
 		}
 	}
 	return nil, fmt.Errorf("action with ID %d not found", id)
+}
+
+func (c *Client) RunMacro(macro Macro) error {
+	if len(macro.Steps) == 0 {
+		return fmt.Errorf("macro has no steps")
+	}
+	actionByID, err := c.validateMacro(macro)
+	if err != nil {
+		return err
+	}
+
+	for index, step := range macro.Steps {
+		action := actionByID[step.ID]
+		if step.Value == 0 {
+			if err := c.TurnOff(step.ID); err != nil {
+				return fmt.Errorf("macro step %d: %w", index+1, err)
+			}
+			continue
+		}
+		if action.Type == ActionTypeLight {
+			action.client = c
+			if err := action.TurnOn(step.Value); err != nil {
+				return fmt.Errorf("macro step %d: %w", index+1, err)
+			}
+			continue
+		}
+		if err := c.ExecuteAction(step.ID, step.Value); err != nil {
+			return fmt.Errorf("macro step %d: %w", index+1, err)
+		}
+	}
+	return nil
+}
+
+func (c *Client) ValidateMacro(macro Macro) error {
+	_, err := c.validateMacro(macro)
+	return err
+}
+
+func (c *Client) validateMacro(macro Macro) (map[int]Action, error) {
+	if len(macro.Steps) == 0 {
+		return nil, fmt.Errorf("macro has no steps")
+	}
+	actions, err := c.GetActions()
+	if err != nil {
+		return nil, fmt.Errorf("load actions for macro: %w", err)
+	}
+	actionByID := make(map[int]Action, len(actions))
+	for _, action := range actions {
+		actionByID[action.ID] = action
+	}
+
+	for index, step := range macro.Steps {
+		action, ok := actionByID[step.ID]
+		if !ok {
+			return nil, fmt.Errorf("macro step %d: action %d not found", index+1, step.ID)
+		}
+		if action.Type != step.Type {
+			return nil, fmt.Errorf("macro step %d: action %d is %s, not %s", index+1, step.ID, action.Type, step.Type)
+		}
+		if step.Value < 0 || step.Value > MaxActionValue {
+			return nil, fmt.Errorf("macro step %d: value must be between 0 and %d", index+1, MaxActionValue)
+		}
+	}
+	return actionByID, nil
 }

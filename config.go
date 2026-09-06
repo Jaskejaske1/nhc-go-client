@@ -1,5 +1,5 @@
 // config.go
-package main
+package nhc
 
 import (
 	"encoding/json"
@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+
+	"nhc-go-client/internal/curve"
 )
 
 // Errors
@@ -27,19 +29,46 @@ type DeviceAliases struct {
 	Sockets map[int]string `json:"sockets,omitempty"`
 }
 
+type BrightnessSettings struct {
+	Type   string        `json:"type,omitempty"`
+	Gamma  float64       `json:"gamma,omitempty"`
+	Points []curve.Point `json:"points,omitempty"`
+}
+
+func DefaultBrightnessSettings() BrightnessSettings {
+	return BrightnessSettings{Type: "linear"}
+}
+
+func (s BrightnessSettings) Mapper() (curve.Mapper, error) {
+	switch s.Type {
+	case "", "linear":
+		return curve.Linear{}, nil
+	case "gamma":
+		return curve.NewGamma(s.Gamma)
+	case "lookup":
+		return curve.NewLookup(s.Points)
+	default:
+		return nil, fmt.Errorf("unknown brightness curve: %s", s.Type)
+	}
+}
+
 // Add this type for JSON loading
 type configJSON struct {
-	IP      string        `json:"ip"`
-	Port    int           `json:"port"`
-	Timeout string        `json:"timeout"`
-	Aliases DeviceAliases `json:"aliases,omitempty"`
+	IP         string             `json:"ip"`
+	Port       int                `json:"port"`
+	Timeout    string             `json:"timeout"`
+	Aliases    DeviceAliases      `json:"aliases,omitempty"`
+	Brightness BrightnessSettings `json:"brightness,omitempty"`
+	Macros     map[string]Macro   `json:"macros,omitempty"`
 }
 
 type NikoConfig struct {
-	IP      string        `json:"ip"`
-	Port    int           `json:"port"`
-	Timeout time.Duration `json:"timeout"`
-	Aliases DeviceAliases `json:"aliases,omitempty"`
+	IP         string             `json:"ip"`
+	Port       int                `json:"port"`
+	Timeout    time.Duration      `json:"timeout"`
+	Aliases    DeviceAliases      `json:"aliases,omitempty"`
+	Brightness BrightnessSettings `json:"brightness,omitempty"`
+	Macros     map[string]Macro   `json:"macros,omitempty"`
 }
 
 // ConfigOption represents a function that modifies the configuration
@@ -66,6 +95,19 @@ func WithTimeout(timeout time.Duration) ConfigOption {
 	}
 }
 
+func WithBrightnessCurve(curveType string) ConfigOption {
+	return func(c *NikoConfig) {
+		c.Brightness.Type = curveType
+	}
+}
+
+func WithBrightnessGamma(gamma float64) ConfigOption {
+	return func(c *NikoConfig) {
+		c.Brightness.Type = "gamma"
+		c.Brightness.Gamma = gamma
+	}
+}
+
 // DefaultConfig returns the default configuration
 func DefaultConfig() NikoConfig {
 	return NikoConfig{
@@ -76,6 +118,8 @@ func DefaultConfig() NikoConfig {
 			Scenes:  make(map[int]string),
 			Sockets: make(map[int]string),
 		},
+		Brightness: DefaultBrightnessSettings(),
+		Macros:     make(map[string]Macro),
 	}
 }
 
@@ -146,6 +190,12 @@ func (c *NikoConfig) loadFromFile() error {
 	c.IP = jsonConfig.IP
 	c.Port = jsonConfig.Port
 	c.Aliases = jsonConfig.Aliases
+	if jsonConfig.Macros != nil {
+		c.Macros = jsonConfig.Macros
+	}
+	if jsonConfig.Brightness.Type != "" {
+		c.Brightness = jsonConfig.Brightness
+	}
 
 	// Parse the timeout string into a duration
 	timeout, err := time.ParseDuration(jsonConfig.Timeout)
@@ -174,6 +224,17 @@ func (c *NikoConfig) loadFromEnv() {
 			c.Timeout = timeout
 		}
 	}
+
+	if curveType := os.Getenv("NHC_BRIGHTNESS_CURVE"); curveType != "" {
+		c.Brightness.Type = curveType
+	}
+
+	if gammaStr := os.Getenv("NHC_BRIGHTNESS_GAMMA"); gammaStr != "" {
+		if gamma, err := strconv.ParseFloat(gammaStr, 64); err == nil {
+			c.Brightness.Type = "gamma"
+			c.Brightness.Gamma = gamma
+		}
+	}
 }
 
 // validate checks if the configuration is valid
@@ -195,6 +256,10 @@ func (c *NikoConfig) validate() error {
 		return fmt.Errorf("%w: minimum 1 second required", ErrInvalidTimeout)
 	}
 
+	if _, err := c.Brightness.Mapper(); err != nil {
+		return fmt.Errorf("invalid brightness curve: %w", err)
+	}
+
 	return nil
 }
 
@@ -207,10 +272,12 @@ func (c *NikoConfig) SaveConfig() error {
 
 	// Create a temporary struct for JSON marshaling
 	jsonConfig := configJSON{
-		IP:      c.IP,
-		Port:    c.Port,
-		Timeout: c.Timeout.String(), // This will format it as "20s" instead of nanoseconds
-		Aliases: c.Aliases,
+		IP:         c.IP,
+		Port:       c.Port,
+		Timeout:    c.Timeout.String(),
+		Aliases:    c.Aliases,
+		Brightness: c.Brightness,
+		Macros:     c.Macros,
 	}
 
 	configPath, err := GetConfigPath()
