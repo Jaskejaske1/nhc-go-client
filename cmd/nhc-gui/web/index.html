@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Niko Home Control</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">NIKO HOME CONTROL / V1</p>
+        <h1>House control</h1>
+      </div>
+      <div class="connection"><span class="dot"></span><span id="connection-text">Connecting</span></div>
+    </header>
+
+    <section class="hero-panel">
+      <div>
+        <p class="eyebrow">LIVE SNAPSHOT</p>
+        <h2 id="active-count">Loading actions</h2>
+        <p class="muted" id="updated-at">Waiting for the controller</p>
+      </div>
+      <button class="refresh" id="refresh" type="button">Refresh</button>
+    </section>
+
+    <section id="rooms" class="rooms" aria-live="polite"></section>
+    <p id="error" class="error" hidden></p>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
